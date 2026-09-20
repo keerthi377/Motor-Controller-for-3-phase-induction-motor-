@@ -1,0 +1,123 @@
+#include "main.h"
+#include "math.h"
+
+#define PI 3.14159265358979323846f
+
+// Hardware Configuration Constants
+#define PWM_ARR             8500.0f    // Auto-Reload Register value for 10 kHz PWM
+#define BASE_FREQ           50.0f      // Rated frequency in Hz
+#define V_BOOST             0.10f      // 10% Voltage boost at low frequency (stator resistance compensation)
+#define PWM_FREQ            10000.0f   // Switching frequency (Hz)
+#define TS                  (1.0f / PWM_FREQ) // Interrupt sample period (100 us)
+
+// Sine Table for fast Sine Wave Generation (256 Points)
+#define SINE_STEPS          256
+static const float sine_table[SINE_STEPS] = {
+    0.0000f, 0.0245f, 0.0491f, 0.0736f, 0.0980f, 0.1224f, 0.1467f, 0.1710f,
+    0.1951f, 0.2191f, 0.2430f, 0.2667f, 0.2903f, 0.3137f, 0.3369f, 0.3599f,
+    0.3827f, 0.4052f, 0.4276f, 0.4496f, 0.4714f, 0.4929f, 0.5141f, 0.5350f,
+    0.5556f, 0.5758f, 0.5957f, 0.6152f, 0.6344f, 0.6532f, 0.6716f, 0.6895f,
+    0.7071f, 0.7242f, 0.7410f, 0.7572f, 0.7730f, 0.7883f, 0.8032f, 0.8176f,
+    0.8315f, 0.8449f, 0.8577f, 0.8701f, 0.8819f, 0.8932f, 0.9040f, 0.9142f,
+    0.9239f, 0.9330f, 0.9415f, 0.9495f, 0.9569f, 0.9638f, 0.9700f, 0.9757f,
+    0.9808f, 0.9852f, 0.9891f, 0.9923f, 0.9949f, 0.9969f, 0.9983f, 0.9992f,
+    1.0000f, 0.9992f, 0.9983f, 0.9969f, 0.9949f, 0.9923f, 0.9891f, 0.9852f,
+    0.9808f, 0.9757f, 0.9700f, 0.9638f, 0.9569f, 0.9495f, 0.9415f, 0.9330f,
+    0.9239f, 0.9142f, 0.9040f, 0.8932f, 0.8819f, 0.8701f, 0.8577f, 0.8449f,
+    0.8315f, 0.8176f, 0.8032f, 0.7883f, 0.7730f, 0.7572f, 0.7410f, 0.7242f,
+    0.7071f, 0.6895f, 0.6716f, 0.6532f, 0.6344f, 0.6152f, 0.5957f, 0.5758f,
+    0.5556f, 0.5350f, 0.5141f, 0.4929f, 0.4714f, 0.4496f, 0.4276f, 0.4052f,
+    0.3827f, 0.3599f, 0.3369f, 0.3137f, 0.2903f, 0.2667f, 0.2430f, 0.2191f,
+    0.1951f, 0.1710f, 0.1467f, 0.1224f, 0.0980f, 0.0736f, 0.0491f, 0.0245f,
+    0.0000f, -0.0245f, -0.0491f, -0.0736f, -0.0980f, -0.1224f, -0.1467f, -0.1710f,
+    -0.1951f, -0.2191f, -0.2430f, -0.2667f, -0.2903f, -0.3137f, -0.3369f, -0.3599f,
+    -0.3827f, -0.4052f, -0.4276f, -0.4496f, -0.4714f, -0.4929f, -0.5141f, -0.5350f,
+    -0.5556f, -0.5758f, -0.5957f, -0.6152f, -0.6344f, -0.6532f, -0.6716f, -0.6895f,
+    -0.7071f, -0.7242f, -0.7410f, -0.7572f, -0.7730f, -0.7883f, -0.8032f, -0.8176f,
+    -0.8315f, -0.8449f, -0.8577f, -0.8701f, -0.8819f, -0.8932f, -0.9040f, -0.9142f,
+    -0.9239f, -0.9330f, -0.9415f, -0.9495f, -0.9569f, -0.9638f, -0.9700f, -0.9757f,
+    -0.9808f, -0.9852f, -0.9891f, -0.9923f, -0.9949f, -0.9969f, -0.9983f, -0.9992f,
+    -1.0000f, -0.9992f, -0.9983f, -0.9969f, -0.9949f, -0.9923f, -0.9891f, -0.9852f,
+    -0.9808f, -0.9757f, -0.9700f, -0.9638f, -0.9569f, -0.9495f, -0.9415f, -0.9330f,
+    -0.9239f, -0.9142f, -0.9040f, -0.8932f, -0.8819f, -0.8701f, -0.8577f, -0.8449f,
+    -0.8315f, -0.8176f, -0.8032f, -0.7883f, -0.7730f, -0.7572f, -0.7410f, -0.7242f,
+    -0.7071f, -0.6895f, -0.6716f, -0.6532f, -0.6344f, -0.6152f, -0.5957f, -0.5758f,
+    -0.5556f, -0.5350f, -0.5141f, -0.4929f, -0.4714f, -0.4496f, -0.4276f, -0.4052f,
+    -0.3827f, -0.3599f, -0.3369f, -0.3137f, -0.2903f, -0.2667f, -0.2430f, -0.2191f,
+    -0.1951f, -0.1710f, -0.1467f, -0.1224f, -0.0980f, -0.0736f, -0.0491f, -0.0245f
+};
+
+// Control Variables
+volatile float target_freq = 25.0f;  // Setpoint frequency in Hz (e.g., 25 Hz)
+volatile float current_freq = 0.0f;   // Actual frequency executing
+volatile float angle_rad = 0.0f;      // Current electrical angle
+extern TIM_HandleTypeDef htim1;       // Advanced Timer handle
+
+// Fast Sine Look-up Helper
+float Get_Sine(float angle) {
+    while (angle >= 2.0f * PI) angle -= 2.0f * PI;
+    while (angle < 0.0f) angle += 2.0f * PI;
+    int index = (int)((angle / (2.0f * PI)) * SINE_STEPS);
+    return sine_table[index % SINE_STEPS];
+}
+
+// 10 kHz TIM1 Update Interrupt - Executes Scalar V/f Logic
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+    if (htim->Instance == TIM1) {
+        
+        // 1. Soft-Start Frequency Ramp (Prevents Inrush Current)
+        float ramp_step = 0.05f; // 5 Hz/sec acceleration
+        if (current_freq < target_freq) {
+            current_freq += ramp_step;
+            if (current_freq > target_freq) current_freq = target_freq;
+        } else if (current_freq > target_freq) {
+            current_freq -= ramp_step;
+            if (current_freq < target_freq) current_freq = target_freq;
+        }
+
+        // 2. Linear V/f Profile Calculation with Voltage Boost
+        float modulation_index = 0.0f;
+        if (current_freq > 0.5f) {
+            // V/f equation: M = V_boost + (1 - V_boost) * (f / f_rated)
+            modulation_index = V_BOOST + (1.0f - V_BOOST) * (current_freq / BASE_FREQ);
+            if (modulation_index > 1.0f) modulation_index = 1.0f; // Limit to 100% modulation
+        } else {
+            modulation_index = 0.0f; // Stop output below 0.5 Hz
+        }
+
+        // 3. Electrical Angle Integration
+        angle_rad += 2.0f * PI * current_freq * TS;
+        if (angle_rad >= 2.0f * PI) {
+            angle_rad -= 2.0f * PI;
+        }
+
+        // 4. Three-Phase Sine Wave Generation (120° Phase Shifts)
+        float sin_u = Get_Sine(angle_rad);
+        float sin_v = Get_Sine(angle_rad - (2.0f * PI / 3.0f));
+        float sin_w = Get_Sine(angle_rad + (2.0f * PI / 3.0f));
+
+        // 5. Convert -1.0 to +1.0 Sine Waves to Duty Cycle Registers
+        uint32_t ccr1 = (uint32_t)(((sin_u * modulation_index) + 1.0f) * 0.5f * PWM_ARR);
+        uint32_t ccr2 = (uint32_t)(((sin_v * modulation_index) + 1.0f) * 0.5f * PWM_ARR);
+        uint32_t ccr3 = (uint32_t)(((sin_w * modulation_index) + 1.0f) * 0.5f * PWM_ARR);
+
+        // 6. Update PWM Registers (Hardware Compare Units)
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, ccr1);
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, ccr2);
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, ccr3);
+    }
+}
+
+// System Initialization Call
+void Start_Motor_Inverter(void) {
+    // Start Complementary PWM Channels for IPM Drive
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+    HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+    HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
+    HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_3);
+
+    // Enable Timer Interrupt for Real-Time Execution
+    HAL_TIM_Base_Start_IT(&htim1);
+}
